@@ -1,0 +1,194 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- ENUMS PARA INTEGRIDAD ---
+enum Role {
+  ADMIN
+  COMPANY
+  OPERATOR
+  PASSENGER
+}
+
+enum TicketStatus {
+  PENDING
+  PAID
+  VALIDATED
+  CANCELLED
+}
+
+enum TripStatus {
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum SaleChannel {
+  ATM_CARD
+  ATM_CASH
+  CASHIER // Cajero con atención personalizada
+  MOBILE_APP
+}
+
+enum RefundStatus {
+  NONE
+  PENDING
+  COMPLETED
+}
+
+// --- MODELOS ---
+
+model User {
+  id       String     @id @default(uuid())
+  name     String
+  email    String     @unique
+  password String // Hash para JWT
+  role     Role       @default(PASSENGER)
+  isActive Boolean    @default(true)
+  faceId   String?
+  photoUrl String?
+  // Relaciones
+  operator Operator?
+  tickets  Ticket[]
+  logs     AuditLog[]
+
+  createdAt DateTime @default(now())
+}
+
+model Company {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  operators Operator[]
+  vehicles  Vehicle[]
+  tickets   Ticket[]
+  trips     Trip[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Operator {
+  id               String    @id @default(uuid())
+  licenseNumber    String    @unique
+  licenseExpiresAt DateTime?
+  isValidated      Boolean   @default(false)
+  userId           String    @unique
+  user             User      @relation(fields: [userId], references: [id])
+  companyId        String
+  company          Company   @relation(fields: [companyId], references: [id])
+
+  trips Trip[]
+}
+
+model Vehicle {
+  id        String  @id @default(uuid())
+  plate     String  @unique
+  isActive  Boolean @default(true)
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  trips Trip[]
+}
+
+// Tarifas homologadas (origen–destino o tipo). Autorización admin.
+model Fare {
+  id            String    @id @default(uuid())
+  name          String // Ej: "Ruta Centro-Aeropuerto"
+  origin        String
+  destination   String
+  price         Decimal
+  isActive      Boolean   @default(true)
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([origin, destination])
+  @@index([isActive])
+}
+
+model Ticket {
+  id      String       @id @default(uuid())
+  folio   String       @unique // Folio único e irrepetible
+  price   Decimal
+  status  TicketStatus @default(PENDING)
+  channel SaleChannel
+
+  // Validación de pago: boleto solo confirmado cuando paidAt está seteado
+  paidAt           DateTime?
+  paymentReference String?
+
+  // Cancelaciones y reembolsos (reglas de tiempo/tipo en aplicación)
+  cancelledAt        DateTime?
+  cancellationReason String?
+  refundStatus       RefundStatus @default(NONE)
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  // Vinculación Pasajero (opcional si es venta por folio/QR sin cuenta)
+  passengerId  String?
+  passenger    User?   @relation(fields: [passengerId], references: [id])
+  guestName    String?
+  guestContact String?
+
+  trip      Trip?
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+  @@index([status, channel])
+  @@index([createdAt])
+}
+
+model Trip {
+  id          String     @id @default(uuid())
+  status      TripStatus @default(ASSIGNED)
+  startTime   DateTime?
+  endTime     DateTime?
+  origin      String
+  destination String
+
+  // Ubicación en tiempo real (actualizada vía app operador / WebSockets)
+  currentLat        Decimal?
+  currentLng        Decimal?
+  locationUpdatedAt DateTime?
+
+  // Relaciones obligatorias
+  ticketId   String   @unique
+  ticket     Ticket   @relation(fields: [ticketId], references: [id])
+  operatorId String
+  operator   Operator @relation(fields: [operatorId], references: [id])
+  vehicleId  String
+  vehicle    Vehicle  @relation(fields: [vehicleId], references: [id])
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id])
+
+  @@index([status])
+  @@index([companyId])
+  @@index([startTime])
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  action       String
+  resourceType String? // Ej: "Trip", "Ticket"
+  resourceId   String?
+  metadata     Json? // Para guardar el "antes y después"
+  ip           String?
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  createdAt    DateTime @default(now())
+}

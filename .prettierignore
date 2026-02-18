@@ -1,0 +1,19 @@
+# Build & dependencies
+dist
+node_modules
+.pnpm-store
+
+# Generated
+generated
+
+# Lockfiles (no formatear para evitar ruido en diff)
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Logs & coverage
+coverage
+*.log
+
+# Prisma (sin parser por defecto; usa prettier-plugin-prisma si quieres formatear)
+prisma
