@@ -16,7 +16,7 @@
     "start": "nest start",
     "migrate:dev": "npx prisma migrate dev",
     "migrate:prod": "npx prisma migrate deploy",
-    "start:dev": "nest start --watch",
+    "start:dev": "dotenv -e .env.local -- nest start --watch --port 1337",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main",
     "prisma:migrate:prod": "dotenv -e .env.prod -- prisma migrate deploy",
