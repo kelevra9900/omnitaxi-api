@@ -8,7 +8,7 @@
   "scripts": {
     "seed": "ts-node prisma/seed.ts",
     "seed:prod": "dotenv -e .env.prod -- ts-node prisma/seed.ts",
-    "build": "nest build && tsc-alias -p tsconfig.build.json",
+    "build": "nest build && tsc-alias -p tsconfig.build.json",    
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.{ts,mjs,json}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.{ts,mjs,json}\"",
     "lint": "eslint \"{src,test,prisma}/**/*.ts\" \"*.config.ts\" \"*.config.mjs\" --fix",
