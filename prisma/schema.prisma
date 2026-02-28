@@ -27,6 +27,8 @@ enum TicketStatus {
   PAID
   VALIDATED
   CANCELLED
+  USED
+  REFUNDED
 }
 
 enum TripStatus {
@@ -122,26 +124,27 @@ model Fare {
 
 model Ticket {
   id      String       @id @default(uuid())
-  folio   String       @unique // Folio único e irrepetible
+  folio   String       @unique
   price   Decimal
   status  TicketStatus @default(PENDING)
   channel SaleChannel
 
-  // Validación de pago: boleto solo confirmado cuando paidAt está seteado
+  // Gestión de Pago
   paidAt           DateTime?
   paymentReference String?
 
-  // Cancelaciones y reembolsos (reglas de tiempo/tipo en aplicación)
+  // Post-Venta
   cancelledAt        DateTime?
   cancellationReason String?
   refundStatus       RefundStatus @default(NONE)
 
+  // Relaciones
   companyId String
   company   Company @relation(fields: [companyId], references: [id])
 
-  // Vinculación Pasajero (opcional si es venta por folio/QR sin cuenta)
-  passengerId  String?
-  passenger    User?   @relation(fields: [passengerId], references: [id])
+  passengerId String?
+  passenger   User?   @relation(fields: [passengerId], references: [id])
+
   guestName    String?
   guestContact String?
 
@@ -161,20 +164,27 @@ model Trip {
   origin      String
   destination String
 
-  // Ubicación en tiempo real (actualizada vía app operador / WebSockets)
+  // Monitoreo 24/7
   currentLat        Decimal?
   currentLng        Decimal?
   locationUpdatedAt DateTime?
 
-  // Relaciones obligatorias
-  ticketId   String   @unique
-  ticket     Ticket   @relation(fields: [ticketId], references: [id])
-  operatorId String
-  operator   Operator @relation(fields: [operatorId], references: [id])
-  vehicleId  String
-  vehicle    Vehicle  @relation(fields: [vehicleId], references: [id])
-  companyId  String
-  company    Company  @relation(fields: [companyId], references: [id])
+  // Relación 1:1 con Ticket
+  ticketId String @unique
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  // Relaciones Opcionales al inicio (se vinculan al escanear QR)
+  operatorId String?
+  operator   Operator? @relation(fields: [operatorId], references: [id])
+
+  vehicleId String?
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@index([status])
   @@index([companyId])

@@ -10,7 +10,6 @@ import { RefundStatus, TripStatus } from 'generated/prisma/enums';
 import { TicketStatus } from 'generated/prisma/enums';
 import type { ListTicketsQueryDto } from './dto/list-tickets-query.dto';
 import { CreateTicketDto, ValidateTicketDto } from './create-ticket.dto';
-import { Ticket } from 'generated/prisma/client';
 import { TicketHistoryQueryDto } from './dto/ticket-history.dto';
 
 interface QRTicketPayload {
@@ -60,14 +59,48 @@ export class TicketsService {
     };
   }
 
+  async validateAndStartTrip(operatorId: string, vehicleId: string, dto: ValidateTicketDto) {
+    return await this.prisma.$transaction(async (tx) => {
+      // 1. Asegúrate de que el ticket incluya el trip en la búsqueda inicial
+      const ticket = await tx.ticket.findUnique({
+        where: { folio: dto.folio },
+        include: { trip: true }, // Crucial para que ticket.trip no sea 'any'
+      });
+
+      // 2. Validación de seguridad (Type Guard)
+      if (!ticket || !ticket.trip) {
+        throw new NotFoundException('El boleto no tiene un viaje asociado.');
+      }
+
+      // 3. Actualizaciones
+      await tx.ticket.update({
+        where: { id: ticket.id },
+        data: { status: TicketStatus.USED as TicketStatus },
+      });
+
+      // Ahora TS sabe que ticket.trip.id existe y es un string
+      const updatedTrip = await tx.trip.update({
+        where: { id: ticket.trip.id },
+        data: {
+          status: TripStatus.IN_PROGRESS,
+          startTime: new Date(),
+          operatorId: operatorId,
+          vehicleId: vehicleId,
+        },
+      });
+
+      return updatedTrip;
+    });
+  }
+
   async issueTicket(
     dto: CreateTicketDto,
-  ): Promise<{ ticket: Ticket; tripId: string; message: string }> {
-    // 1. Validar la tarifa homologada para asegurar integridad de precios
+  ): Promise<{ ticket: any; tripId: string; message: string }> {
+    // 1. Validar Tarifa Homologada
     const fare = await this.prisma.fare.findFirst({
       where: {
-        origin: dto.origin,
-        destination: dto.destination,
+        origin: { equals: dto.origin, mode: 'insensitive' },
+        destination: { equals: dto.destination, mode: 'insensitive' },
         isActive: true,
       },
     });
@@ -76,64 +109,59 @@ export class TicketsService {
       throw new BadRequestException('No existe una tarifa oficial para esa ruta.');
     }
 
-    // 2. Generar Folio Único e Irrepetible (Formato OMA-Año-Random)
+    // 2. Generar Folio (OMA-Año-Contador)
     const year = new Date().getFullYear();
-    const randomSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
-    const folio = `OMA-${year}-${randomSuffix}`;
+    const ticketCount = await this.prisma.ticket.count();
+    const folio = `OMA-${year}-${(ticketCount + 1).toString().padStart(5, '0')}`;
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        // 3. Crear el Ticket (Asociación con Pasajero o Guest)
+        // 3. Crear el Ticket según tu modelo exacto
         const ticket = await tx.ticket.create({
           data: {
             folio,
-            price: fare.price, // Usamos el precio de la DB, no el del DTO
+            price: fare.price,
             channel: dto.channel,
-            status: TicketStatus.PAID, // En App Móvil nace como PAID tras auth exitosa
+            status: TicketStatus.PAID, // Marcamos como pagado de entrada
             paidAt: new Date(),
             paymentReference: dto.paymentReference,
             companyId: dto.companyId,
-            passengerId: dto.passengerId,
-            guestName: dto.guestName,
-            guestContact: dto.paymentReference,
+            passengerId: dto.passengerId || null,
+            guestName: dto.guestName || null,
+            // guestContact puede ser el mismo paymentReference o un campo del DTO
           },
         });
 
-        // 4. Crear el Trip asociado para Monitoreo en Tiempo Real
-        // Nota: En este punto el Trip queda ASSIGNED pero sin operador fijo
-        // hasta que un operador realice la validación por QR.
         const trip = await tx.trip.create({
           data: {
-            status: TripStatus.ASSIGNED,
             origin: dto.origin,
             destination: dto.destination,
+            status: TripStatus.ASSIGNED,
             ticketId: ticket.id,
             companyId: dto.companyId,
-            operatorId: 'temporary-placeholder-id',
-            vehicleId: 'temporary-placeholder-id',
           },
         });
 
-        // 5. Registrar en AuditLog para Auditoría
+        // 5. Auditoría
         await tx.auditLog.create({
           data: {
             action: 'TICKET_ISSUED',
             resourceType: 'Ticket',
             resourceId: ticket.id,
             userId: dto.passengerId || 'SYSTEM_GUEST',
-            metadata: { folio, fareId: fare.id, tripId: trip.id },
+            metadata: { folio, tripId: trip.id },
           },
         });
 
         return {
           ticket,
           tripId: trip.id,
-          message: 'Boleto emitido con éxito. Listo para abordar.',
+          message: 'Boleto emitido con éxito. OMA te desea un buen viaje.',
         };
       });
     } catch (error) {
-      console.error('Error al emitir boleto:', error);
-      throw new InternalServerErrorException('Error en la vinculación obligatoria del servicio.');
+      console.error('Error en transacción de ticket:', error);
+      throw new InternalServerErrorException('Error al procesar la vinculación del servicio.');
     }
   }
 
@@ -153,10 +181,23 @@ export class TicketsService {
         },
         trip: {
           select: {
+            destination: true,
+            origin: true,
+            startTime: true,
+            endTime: true,
             status: true,
             vehicle: {
               select: {
                 plate: true, // Para mostrar "Unidad: OMA-402"
+              },
+            },
+            operator: {
+              select: {
+                user: {
+                  select: {
+                    name: true,
+                  },
+                },
               },
             },
           },
@@ -166,12 +207,29 @@ export class TicketsService {
         createdAt: 'desc', // Traer el más reciente
       },
     });
+    const qrSecret = process.env.QR_SECRET_KEY ?? '';
+    // Leemos la variable de entorno, con 1 minuto como fallback de seguridad
+    const qrExpiresIn = (process.env.QR_EXPIRES_IN || '1m') as any;
 
     if (!ticket) {
-      throw new NotFoundException('No tienes tickets activos en este momento.');
+      return {
+        message: 'No tienes tickets activos',
+        qrCodePayload: null,
+      };
     }
 
-    return ticket;
+    const payload: QRTicketPayload = {
+      ticketId: ticket.id,
+      folio: ticket.folio,
+    };
+
+    // Usamos la variable dinámica
+    const qrData = jwt.sign(payload, qrSecret, { expiresIn: qrExpiresIn });
+
+    return {
+      ...ticket,
+      qrCodePayload: qrData,
+    };
   }
 
   async getCurrentTicket(userId: string) {
@@ -244,7 +302,17 @@ export class TicketsService {
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
-        include: { company: true, passenger: true, trip: true },
+        include: {
+          company: true,
+          passenger: {
+            select: {
+              name: true,
+              email: true,
+              photoUrl: true,
+            },
+          },
+          trip: true,
+        },
       }),
       this.prisma.ticket.count({ where }),
     ]);
@@ -281,12 +349,40 @@ export class TicketsService {
     return this.findById(id);
   }
 
-  async validateTicket(validateTicketDto: ValidateTicketDto) {
+  async validateTicket(dto: ValidateTicketDto) {
+    // 1. Incluimos el 'trip' para saber a dónde va el pasajero de inmediato
     const ticket = await this.prisma.ticket.findUnique({
-      where: { folio: validateTicketDto.folio },
+      where: { folio: dto.folio },
+      include: {
+        trip: true,
+        passenger: { select: { name: true, email: true } }, // Para que el chofer confirme el nombre
+      },
     });
+
+    // 2. Validaciones Críticas
     if (!ticket) throw new NotFoundException('Boleto no encontrado');
-    return ticket;
+
+    // Verificar si el boleto ya fue usado
+    if (ticket.status === TicketStatus.USED) {
+      throw new BadRequestException('Este boleto ya ha sido utilizado.');
+    }
+
+    // Verificar si está pagado (si es de la App)
+    if (ticket.status === TicketStatus.PENDING) {
+      throw new BadRequestException('El boleto aún no ha sido liquidado.');
+    }
+
+    // 3. Retornar información útil para la App del Operador
+    return {
+      id: ticket.id,
+      folio: ticket.folio,
+      passengerName: ticket.passenger?.name || ticket.guestName || 'Pasajero General',
+      origin: ticket.trip?.origin,
+      destination: ticket.trip?.destination,
+      price: ticket.price,
+      status: ticket.status,
+      tripId: ticket.trip?.id,
+    };
   }
 
   async getRefundStatus(id: string) {

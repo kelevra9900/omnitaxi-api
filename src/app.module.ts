@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
+import { ConfigModule } from '@nestjs/config';
 import { AppController } from '@/app.controller';
 import { AppService } from '@/app.service';
 import { LoggingInterceptor } from '@/common/interceptors/logging.interceptor';
@@ -24,6 +25,10 @@ import { TripsModule } from './modules/trips/trips.module';
     CompaniesModule,
     VehiclesModule,
     TripsModule,
+    ConfigModule.forRoot({
+      envFilePath: `.env.${process.env.NODE_ENV}`,
+      isGlobal: true,
+    }),
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],

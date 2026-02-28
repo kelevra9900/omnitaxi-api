@@ -26,14 +26,26 @@ import { UpdateOperatorDto } from './dto/update-operator.dto';
 import { ListOperatorsQueryDto } from './dto/list-operators-query.dto';
 import { OperatorResponseDto } from './dto/operator-response.dto';
 import { OperatorsService } from './operators.service';
+import { GetUserId } from '@/common/decorators/user.decorator';
 
 @ApiTags('Operators')
 @Controller('operators')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
+@Roles(Role.ADMIN, Role.OPERATOR)
 @ApiBearerAuth('Bearer')
 export class OperatorsController {
   constructor(private readonly operatorsService: OperatorsService) {}
+
+  @Get('dashboard')
+  @ApiOperation({
+    summary: 'Dashboard del operador',
+    description: 'Take the user id from the token and return the dashboard data.',
+  })
+  @ApiResponse({ status: 200, description: 'Dashboard del operador.' })
+  @ApiOperation({ summary: 'Dashboard del operador' })
+  async dashboard(@GetUserId() userId: string) {
+    return this.operatorsService.getDashboardData(userId);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Crear operador (vincular usuario + empresa + licencia)' })

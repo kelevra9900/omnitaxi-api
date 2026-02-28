@@ -45,6 +45,7 @@ export class CompaniesController {
   }
 
   @Get()
+  @Roles(Role.ADMIN, Role.PASSENGER)
   @ApiOperation({ summary: 'Listar empresas (paginado)' })
   @ApiResponse({ status: 200, description: 'Lista paginada de empresas.' })
   async findAll(@Query() query: ListCompaniesQueryDto) {

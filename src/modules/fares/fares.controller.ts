@@ -30,7 +30,7 @@ import { FaresService } from './fares.service';
 @ApiTags('Fares')
 @Controller('fares')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.ADMIN)
+@Roles(Role.ADMIN, Role.PASSENGER)
 @ApiBearerAuth('Bearer')
 export class FaresController {
   constructor(private readonly faresService: FaresService) {}

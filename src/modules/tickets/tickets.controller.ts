@@ -31,6 +31,7 @@ import { CancelTicketDto } from './dto/cancel-ticket.dto';
 import { CreateTicketDto, ValidateTicketDto } from './create-ticket.dto';
 import { TicketHistoryQueryDto } from './dto/ticket-history.dto';
 import { RequestUser } from '../auth/auth.controller';
+import { GetUserId } from '@/common/decorators/user.decorator';
 
 @ApiTags('Tickets')
 @Controller('tickets')
@@ -46,10 +47,12 @@ export class TicketsController {
     status: 201,
     description: 'Boleto emitido con folio único tras validación de pago.',
   })
-  create(@Body() createTicketDto: CreateTicketDto) {
-    return this.ticketsService.issueTicket(createTicketDto);
+  create(@GetUserId() userId: string, @Body() createTicketDto: CreateTicketDto) {
+    return this.ticketsService.issueTicket({
+      ...createTicketDto,
+      passengerId: userId,
+    });
   }
-
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.ADMIN)
@@ -60,7 +63,7 @@ export class TicketsController {
     return this.ticketsService.findAllPaginated(query);
   }
 
-  @Get('history')
+  @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('Bearer')
   @ApiOperation({ summary: 'Obtener historial de viajes del pasajero' })

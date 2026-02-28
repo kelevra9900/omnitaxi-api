@@ -4,18 +4,15 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
+import { jwtConstants } from '@/common/constants';
 
 @Module({
   imports: [
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({
-      secret: process.env.JWT_SECRET_AUTH ?? '',
-      signOptions: {
-        // 7 días en segundos; o setea JWT_EXPIRES_IN (ej. "7d" requiere tipo correcto en @nestjs/jwt)
-        expiresIn: process.env.JWT_EXPIRES_IN
-          ? Number(process.env.JWT_EXPIRES_IN) || 604800
-          : 604800,
-      },
+      global: true,
+      secret: jwtConstants.secret,
+      signOptions: { expiresIn: jwtConstants.expiresIn as number },
     }),
   ],
   controllers: [AuthController],

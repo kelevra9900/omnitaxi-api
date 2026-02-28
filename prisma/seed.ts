@@ -1,159 +1,197 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 import { PrismaClient } from '../generated/prisma/client';
-import { Role, TicketStatus, SaleChannel, TripStatus } from '../generated/prisma/enums';
+import { Role, TicketStatus, SaleChannel, TripStatus, RefundStatus } from '../generated/prisma/enums';
 import { faker } from '@faker-js/faker';
+import { DateTime } from 'luxon';
 
 const prisma = new PrismaClient();
 
-const CENTER_LAT = 19.4326;
-const CENTER_LNG = -99.1332;
+// --- CONFIGURACIÓN DE MOCKS ---
+const GDL_LAT = 20.6668;
+const GDL_LNG = -103.3918;
 
-async function main() {
-  console.log('--- Iniciando limpieza de tablas ---');
-  await prisma.auditLog.deleteMany();
-  await prisma.trip.deleteMany();
-  await prisma.ticket.deleteMany();
-  await prisma.operator.deleteMany();
-  await prisma.vehicle.deleteMany();
-  await prisma.fare.deleteMany();
-  await prisma.company.deleteMany();
-  await prisma.user.deleteMany();
+const VEHICLE_MODELS = [
+  'Toyota Hiace', 'Nissan Urvan', 'Mercedes-Benz Sprinter', 
+  'Chevrolet Aveo', 'VW Jetta', 'Hyundai Elantra', 
+  'Ford Transit', 'Honda Odyssey'
+];
 
-  console.log('--- Creando Empresa y Tarifas (Fares) ---');
+async function cleanDatabase() {
+  console.log('--- Limpiando base de datos ---');
+  // El orden es vital por las FKs
+  const tables = [
+    'AuditLog', 'Trip', 'Ticket', 'Operator', 
+    'Vehicle', 'Fare', 'Company', 'User'
+  ];
   
+  for (const table of tables) {
+    // @ts-ignore - Acceso dinámico para simplificar el seed
+    await prisma[table.charAt(0).toLowerCase() + table.slice(1)].deleteMany();
+  }
+}
+
+async function createBaseInfrastructure() {
+  console.log('--- Creando Infraestructura Base ---');
   const company = await prisma.company.create({
     data: { name: 'OMA SISTEMAS Logistics' }
   });
 
-  // Creamos 5 tarifas homologadas para que el sistema tenga rutas predefinidas
   const fares = await Promise.all([
-    prisma.fare.create({ data: { name: 'Ruta Express Norte', origin: 'Terminal Norte', destination: 'Santa Fe', price: 45.00 } }),
-    prisma.fare.create({ data: { name: 'Conexión Aeropuerto', origin: 'Centro Histórico', destination: 'AICM T1', price: 120.00 } }),
-    prisma.fare.create({ data: { name: 'Circuito Universidad', origin: 'Coyoacán', destination: 'CU', price: 15.50 } }),
-    prisma.fare.create({ data: { name: 'Corredor Reforma', origin: 'Chapultepec', destination: 'Bellas Artes', price: 25.00 } }),
-    prisma.fare.create({ data: { name: 'Interurbano Toluca', origin: 'Observatorio', destination: 'Toluca Centro', price: 85.00 } }),
+    prisma.fare.create({ data: { name: 'Ruta Aeropuerto Premium', origin: 'Aeropuerto GDL', destination: 'Hotel RIU GDL', price: 450.00 } }),
+    prisma.fare.create({ data: { name: 'Ruta Ejecutiva Centro', origin: 'Nueva Central Camionera', destination: 'Catedral GDL', price: 220.00 } }),
+    prisma.fare.create({ data: { name: 'Ruta Corporativa Andares', origin: 'Andares', destination: 'Expo GDL', price: 180.00 } }),
   ]);
 
-  console.log('--- Creando Usuarios (Admin, Operadores, Pasajeros) ---');
+  return { company, fares };
+}
 
-  const admin = await prisma.user.create({
+async function createVehicles(companyId: string, count: number = 5) {
+  console.log(`--- Generando ${count} Vehículos ---`);
+  return Promise.all(
+    Array.from({ length: count }).map(() => {
+      const model = faker.helpers.arrayElement(VEHICLE_MODELS);
+      return prisma.vehicle.create({
+        data: {
+          plate: `${faker.string.alpha({ length: 3, casing: 'upper' })}-${faker.string.numeric(4)}`,
+          companyId,
+          isActive: true,
+          // Nota: Si quieres guardar el modelo, podrías añadir un campo metadata o extender el schema
+        }
+      });
+    })
+  );
+}
+
+async function main() {
+  await cleanDatabase();
+  const { company, fares } = await createBaseInfrastructure();
+  const vehicles = await createVehicles(company.id, 8);
+
+  console.log('--- Creando Usuarios (Admin, Operador, Pasajero) ---');
+
+  // 1. ADMIN
+  await prisma.user.create({
     data: {
-      name: 'Administrador OMA',
-      email: 'admin@omasistemas.com',
-      password: 'hash_secure_password',
+      name: 'Admin OMA',
+      email: 'admin@oma.com',
+      password: 'hash_password_123',
       role: Role.ADMIN,
-      photoUrl: faker.image.avatar(),
     }
   });
 
-  const passengers = await Promise.all(
-    Array.from({ length: 10 }).map(() =>
-      prisma.user.create({
-        data: {
-          name: faker.person.fullName(),
-          email: faker.internet.email(),
-          password: 'hash_password_123',
-          role: Role.PASSENGER,
-          photoUrl: faker.image.avatar(),
-        },
-      })
-    )
-  );
-
+  // 2. OPERADOR
   const opUser = await prisma.user.create({
     data: {
-      name: 'Marcos Operador',
-      email: 'operador1@omasistemas.com',
+      name: 'Juan Carlos Pérez',
+      email: 'operador@oma.com',
       password: 'hash_password_123',
       role: Role.OPERATOR,
-      photoUrl: faker.image.avatar(),
+      photoUrl: 'https://i.pravatar.cc/150?u=operator',
     },
   });
 
   const operator = await prisma.operator.create({
     data: {
-      licenseNumber: 'MX-L-' + faker.string.alphanumeric(8).toUpperCase(),
+      licenseNumber: `L-GDL-${faker.string.alphanumeric(6).toUpperCase()}`,
       userId: opUser.id,
       companyId: company.id,
       isValidated: true,
-      licenseExpiresAt: faker.date.future(),
+      licenseExpiresAt: DateTime.now().plus({ years: 1 }).toJSDate(),
     },
   });
 
-  const vehicle = await prisma.vehicle.create({
+  // 3. PASAJERO
+  const passenger = await prisma.user.create({
     data: {
-      plate: faker.vehicle.vrm(),
-      companyId: company.id,
-      isActive: true,
-    },
+      name: 'Roger Torres',
+      email: 'roger@client.com',
+      password: 'hash_password_123',
+      role: Role.PASSENGER,
+    }
   });
 
-  console.log('--- Generando Historial de Tickets y Viajes ---');
+  console.log('--- Generando Escenarios de Viajes ---');
 
-  for (let i = 0; i < 20; i++) {
-    // Seleccionamos una tarifa aleatoria para que el ticket coincida con la ruta
-    const selectedFare = faker.helpers.arrayElement(fares);
-    const dateOfAction = faker.date.recent({ days: 10 });
+  // ESCENARIO 1: Viaje en Curso (Activo ahora)
+  const ticketActive = await prisma.ticket.create({
+    data: {
+      folio: `OMA-${faker.string.numeric(6)}`,
+      price: fares[0].price,
+      status: TicketStatus.PAID,
+      channel: SaleChannel.MOBILE_APP,
+      companyId: company.id,
+      passengerId: passenger.id,
+      paidAt: DateTime.now().minus({ minutes: 40 }).toJSDate(),
+    }
+  });
 
-    // 1. Crear Ticket (Sin nulos en campos de auditoría)
+  await prisma.trip.create({
+    data: {
+      status: TripStatus.IN_PROGRESS,
+      startTime: DateTime.now().minus({ minutes: 20 }).toJSDate(),
+      origin: fares[0].origin,
+      destination: fares[0].destination,
+      currentLat: GDL_LAT + 0.005,
+      currentLng: GDL_LNG + 0.005,
+      locationUpdatedAt: new Date(),
+      ticketId: ticketActive.id,
+      operatorId: operator.id,
+      vehicleId: vehicles[0].id,
+      companyId: company.id,
+    }
+  });
+
+  // ESCENARIO 2: Historial del día (Viajes Completados)
+  console.log('--- Generando Historial de hoy ---');
+  for (let i = 0; i < 10; i++) {
+    const isGuest = i % 3 === 0; // Algunos viajes son de invitados (sin userId)
+    
     const ticket = await prisma.ticket.create({
       data: {
-        folio: `OMA-${faker.string.alphanumeric(8).toUpperCase()}`,
-        price: selectedFare.price,
-        status: TicketStatus.VALIDATED,
-        channel: faker.helpers.arrayElement([SaleChannel.MOBILE_APP, SaleChannel.ATM_CARD, SaleChannel.CASHIER]),
-        paidAt: dateOfAction,
-        paymentReference: faker.finance.iban(),
+        folio: `OMA-HIST-${100 + i}`,
+        price: fares[1].price,
+        status: TicketStatus.USED,
+        channel: faker.helpers.arrayElement(Object.values(SaleChannel)),
         companyId: company.id,
-        passengerId: faker.helpers.arrayElement(passengers).id,
-        createdAt: dateOfAction,
-      },
+        passengerId: isGuest ? null : passenger.id,
+        guestName: isGuest ? faker.person.fullName() : null,
+        paidAt: DateTime.now().minus({ hours: 10 }).toJSDate(),
+      }
     });
 
-    // 2. Crear Viaje (startTime y endTime coherentes)
-    const tripStart = new Date(dateOfAction.getTime() + 10 * 60000); // 10 min después del pago
-    const tripEnd = new Date(tripStart.getTime() + faker.number.int({ min: 15, max: 90 }) * 60000);
-
+    const start = DateTime.now().minus({ hours: i + 2 });
     await prisma.trip.create({
       data: {
         status: TripStatus.COMPLETED,
-        startTime: tripStart,
-        endTime: tripEnd,
-        origin: selectedFare.origin,
-        destination: selectedFare.destination,
-        
-        // Coordenadas simuladas para el track
-        currentLat: faker.location.latitude({ max: CENTER_LAT + 0.05, min: CENTER_LAT - 0.05 }),
-        currentLng: faker.location.longitude({ max: CENTER_LNG + 0.05, min: CENTER_LNG - 0.05 }),
-        locationUpdatedAt: tripEnd,
-
+        startTime: start.toJSDate(),
+        endTime: start.plus({ minutes: 45 }).toJSDate(),
+        origin: fares[1].origin,
+        destination: fares[1].destination,
         ticketId: ticket.id,
         operatorId: operator.id,
-        vehicleId: vehicle.id,
+        vehicleId: faker.helpers.arrayElement(vehicles).id,
         companyId: company.id,
-      },
-    });
-
-    // 3. Crear Log de Auditoría para cada viaje
-    await prisma.auditLog.create({
-      data: {
-        action: 'TRIP_COMPLETED',
-        resourceType: 'Trip',
-        resourceId: ticket.folio,
-        ip: faker.internet.ip(),
-        userId: admin.id,
-        metadata: { status: 'SUCCESS', sync: true },
       }
     });
   }
 
-  console.log('--- Semilla finalizada con éxito: Fares, Users, Operators, Vehicles, Tickets, Trips y Logs cargados ---');
+  // ESCENARIO 3: Auditoría inicial
+  await prisma.auditLog.create({
+    data: {
+      action: 'SEED_DATABASE',
+      resourceType: 'System',
+      userId: opUser.id,
+      metadata: { env: 'development', createdRecords: 15 }
+    }
+  });
+
+  console.log('✅ Seed completado con éxito.');
 }
 
 main()
   .catch((e) => {
-    console.error('Error ejecutando el seed:', e);
+    console.error('❌ Error en el seed:', e);
     process.exit(1);
   })
   .finally(async () => {

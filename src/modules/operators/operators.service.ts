@@ -9,6 +9,8 @@ import { CreateOperatorDto } from './dto/create-operator.dto';
 import { UpdateOperatorDto } from './dto/update-operator.dto';
 import { ListOperatorsQueryDto } from './dto/list-operators-query.dto';
 import type { OperatorResponseDto } from './dto/operator-response.dto';
+import { OperatorDashboardDto } from './dto/operator-dashboard.dto';
+import { DateTime } from 'luxon';
 
 @Injectable()
 export class OperatorsService {
@@ -64,7 +66,17 @@ export class OperatorsService {
         orderBy: { licenseNumber: 'asc' },
         skip,
         take: limit,
-        include: { user: true, company: true },
+        include: {
+          user: {
+            select: {
+              name: true,
+              email: true,
+              photoUrl: true,
+              isActive: true,
+            },
+          },
+          company: true,
+        },
       }),
       this.prisma.operator.count({ where }),
     ]);
@@ -102,5 +114,67 @@ export class OperatorsService {
       },
     });
     return updated;
+  }
+
+  async getDashboardData(operatorId: string): Promise<OperatorDashboardDto> {
+    const zone = 'America/Mexico_City';
+    const startOfToday = DateTime.now().setZone(zone).startOf('day').toJSDate();
+
+    const [operator, activeTrip, statsToday] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: operatorId },
+        select: { id: true, name: true },
+      }),
+      this.prisma.trip.findFirst({
+        where: {
+          operatorId,
+          status: { in: ['ASSIGNED', 'IN_PROGRESS'] },
+        },
+        include: {
+          ticket: true,
+          vehicle: true,
+        },
+      }),
+      this.prisma.trip.count({
+        where: {
+          operatorId,
+          status: 'COMPLETED',
+          createdAt: { gte: startOfToday },
+        },
+      }),
+    ]);
+
+    if (!operator) {
+      throw new NotFoundException('Operador no encontrado');
+    }
+
+    return {
+      operator: {
+        id: operator.id,
+        name: operator.name,
+        isOnline: true,
+        rating: 5.0,
+      },
+      stats: {
+        tripsToday: statsToday,
+        activeVehicle: activeTrip?.vehicle?.plate || 'Sin asignar',
+      },
+      currentTrip: activeTrip
+        ? {
+            id: activeTrip.id,
+            status: activeTrip.status, // TripStatus es asignable a string
+            folio: activeTrip.ticket?.folio || 'SIN-FOLIO',
+            destination: activeTrip.destination,
+            passenger: {
+              name: activeTrip.ticket?.guestName || 'Pasajero OMA',
+              avatarChar: (activeTrip.ticket?.guestName || 'P')[0].toUpperCase(),
+            },
+            // Forzamos el retorno de string con un fallback
+            startTime: DateTime.fromJSDate(activeTrip.startTime || activeTrip.createdAt)
+              .setZone(zone)
+              .toISO() as string,
+          }
+        : null,
+    };
   }
 }
