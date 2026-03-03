@@ -170,7 +170,7 @@ export class TicketsService {
       where: {
         passengerId: userId,
         status: {
-          in: [TicketStatus.PAID, TicketStatus.VALIDATED],
+          in: [TicketStatus.PAID],
         },
       },
       include: {
