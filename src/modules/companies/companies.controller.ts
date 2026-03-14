@@ -16,6 +16,7 @@ import {
   ApiBearerAuth,
   ApiBody,
   ApiParam,
+  ApiOkResponse,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/common/guards/jwt-auth.guard';
 import { Roles } from '@/common/decorators/roles.decorator';
@@ -24,7 +25,7 @@ import { Role } from 'generated/prisma/enums';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 import { ListCompaniesQueryDto } from './dto/list-companies-query.dto';
-import { CompanyResponseDto } from './dto/company-response.dto';
+import { CompanyResponseDto, CompanyWithOperatorsDto } from './dto/company-response.dto';
 import { CompaniesService } from './companies.service';
 
 @ApiTags('Companies')
@@ -50,6 +51,17 @@ export class CompaniesController {
   @ApiResponse({ status: 200, description: 'Lista paginada de empresas.' })
   async findAll(@Query() query: ListCompaniesQueryDto) {
     return this.companiesService.findAllPaginated(query);
+  }
+
+  @Get('with-operators')
+  @Roles(Role.ADMIN, Role.PASSENGER)
+  @ApiOperation({ summary: 'Obtiene la lista de compañías y sus operadores validados' })
+  @ApiOkResponse({
+    description: 'Listado de empresas con sus conductores asociados.',
+    type: [CompanyWithOperatorsDto],
+  })
+  async getCompaniesWithOperators(): Promise<CompanyWithOperatorsDto[]> {
+    return this.companiesService.findAllWithOperators();
   }
 
   @Get(':id')

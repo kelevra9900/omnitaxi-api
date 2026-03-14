@@ -84,4 +84,27 @@ export class CompaniesService {
       data: dto.name != null ? { name: dto.name.trim() } : {},
     });
   }
+
+  async findAllWithOperators() {
+    return this.prisma.company.findMany({
+      select: {
+        id: true,
+        name: true,
+        operators: {
+          where: { isValidated: true },
+          select: {
+            id: true,
+            licenseNumber: true,
+            user: {
+              select: {
+                name: true,
+                photoUrl: true,
+                isActive: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  }
 }

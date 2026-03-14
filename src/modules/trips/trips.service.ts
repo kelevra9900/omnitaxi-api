@@ -3,12 +3,19 @@ import { PrismaService } from '@/prisma/prisma.service';
 import * as dotenv from 'dotenv';
 dotenv.config();
 import * as jwt from 'jsonwebtoken';
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ListTripsQueryDto } from './dto/list-trips-query.dto';
 import { TicketWhereInput } from 'generated/prisma/models';
 import { TicketStatus, TripStatus } from 'generated/prisma/enums';
 import { TripsGateway } from './trip-websocket';
 import { QRTicketPayload } from '@/common/interfaces/qr-ticket-payload.interface';
+import { AssignTripDto } from './dto/assign-trip.dto';
+import { GetAssignmentResourcesDto } from './dto/get-assignment-resources.dto';
 
 @Injectable()
 export class TripsService {
@@ -268,6 +275,127 @@ export class TripsService {
         totalPages: Math.ceil(total / limit),
         hasNextPage: page * limit < total,
       },
+    };
+  }
+
+  /**
+   * Asignar un viaje a un pasajero
+   */
+  async assignTripToPassenger(data: AssignTripDto) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        // 1. Validar Operador (como lo hicimos antes)
+        const operator = await tx.operator.findUnique({
+          where: { id: data.operatorId },
+        });
+
+        if (!operator || !operator.isValidated) {
+          throw new BadRequestException('El operador no es válido o no está activo.');
+        }
+
+        // 2. CREAR EL TICKET (Ahora soporta Passenger o Guest)
+        const newTicket = await tx.ticket.create({
+          data: {
+            folio: `TK-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            price: data.price,
+            status: TicketStatus.PAID,
+            channel: data.channel,
+            companyId: data.companyId,
+            // Aquí está la magia: pasamos los 3, Prisma guarda los que tengan valor
+            passengerId: data.passengerId,
+            guestName: data.guestName,
+            guestContact: data.guestContact,
+          },
+        });
+
+        // 3. CREAR EL VIAJE (Vinculado al ticket)
+        const newTrip = await tx.trip.create({
+          data: {
+            origin: data.origin,
+            destination: data.destination,
+            status: TripStatus.ASSIGNED,
+            ticketId: newTicket.id,
+            operatorId: data.operatorId,
+            vehicleId: data.vehicleId,
+            companyId: data.companyId,
+          },
+          include: {
+            ticket: true,
+            operator: { include: { user: { select: { name: true } } } },
+            vehicle: true,
+          },
+        });
+
+        return newTrip;
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new InternalServerErrorException('Error al asignar el viaje.');
+    }
+  }
+
+  /**
+   * Obtener lo necesario para asignar un viaje a un pasajero
+   *
+   */
+  async getAssignmentResources(query: GetAssignmentResourcesDto) {
+    const { companyId } = query;
+
+    // Condición para saber si un recurso está "Ocupado"
+    const busyTripStatuses = [TripStatus.ASSIGNED, TripStatus.IN_PROGRESS];
+
+    // Buscamos las compañías. Si mandaron companyId, filtramos solo esa.
+    const companies = await this.prisma.company.findMany({
+      where: companyId ? { id: companyId } : undefined,
+      select: {
+        id: true,
+        name: true,
+        // Traemos solo operadores DISPONIBLES de esta compañía
+        operators: {
+          where: {
+            isValidated: true, // Debe estar validado
+            trips: {
+              none: {
+                // NO debe tener viajes en estos estados
+                status: { in: busyTripStatuses },
+              },
+            },
+          },
+          select: {
+            id: true,
+            licenseNumber: true,
+            user: { select: { name: true, photoUrl: true } },
+          },
+        },
+        // Traemos solo vehículos DISPONIBLES de esta compañía
+        vehicles: {
+          where: {
+            isActive: true, // Debe estar activo
+            trips: {
+              none: {
+                // NO debe tener viajes en estos estados
+                status: { in: busyTripStatuses },
+              },
+            },
+          },
+          select: {
+            id: true,
+            plate: true,
+          },
+        },
+      },
+    });
+
+    // Opcional: También podríamos traer las tarifas (Fares) homologadas
+    // para que el frontend sepa cuánto cobrar.
+    const fares = await this.prisma.fare.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, origin: true, destination: true, price: true },
+    });
+
+    return {
+      companies,
+      fares,
     };
   }
 }
