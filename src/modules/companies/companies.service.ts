@@ -90,6 +90,7 @@ export class CompaniesService {
       select: {
         id: true,
         name: true,
+        vehicles: true,
         operators: {
           where: { isValidated: true },
           select: {
