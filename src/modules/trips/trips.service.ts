@@ -437,4 +437,45 @@ export class TripsService {
       fares,
     };
   }
+
+  /**
+   * Aborta o cancela un viaje por falla mecánica, error o solicitud
+   */
+  async cancelTrip(tripId: string, reason: string, adminId: string) {
+    return await this.prisma.$transaction(async (tx) => {
+      // 1. Marcar el viaje como cancelado
+      const trip = await tx.trip.update({
+        where: { id: tripId },
+        data: {
+          status: 'CANCELLED',
+          endTime: new Date(), // Hora en que se abortó
+        },
+      });
+
+      // 2. Anular el ticket y preparar posible reembolso
+      await tx.ticket.update({
+        where: { id: trip.ticketId },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+          cancellationReason: reason,
+          // Si ya estaba pagado, lo mandamos a PENDING para que finanzas lo revise
+          refundStatus: 'PENDING',
+        },
+      });
+
+      // 3. Registrar el evento crítico en el AuditLog
+      await tx.auditLog.create({
+        data: {
+          action: 'TRIP_CANCELLED',
+          resourceType: 'Trip',
+          resourceId: tripId,
+          userId: adminId,
+          metadata: { reason }, // Guardamos por qué se canceló
+        },
+      });
+
+      return trip;
+    });
+  }
 }

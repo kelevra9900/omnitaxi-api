@@ -12,6 +12,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -31,6 +32,7 @@ import { StartTripDto } from './dto/start-trip.dto';
 import { GetUserId } from '@/common/decorators/user.decorator';
 import { AssignTripDto } from './dto/assign-trip.dto';
 import { GetAssignmentResourcesDto } from './dto/get-assignment-resources.dto';
+import { RequestUser } from '../auth/auth.controller';
 
 @ApiTags('Trips')
 @Controller('trips')
@@ -61,6 +63,19 @@ export class TripsController {
   startTrip(@Body() startTripDto: StartTripDto, @GetUserId() userId: string) {
     // Le pasamos el token del QR y el ID del operador que lo escaneó
     return this.tripsService.startTrip(startTripDto.ticketToken, userId);
+  }
+
+  @Post(':id/cancel')
+  @ApiOperation({ summary: 'Cancelar viaje' })
+  @ApiParam({ name: 'id', description: 'UUID del viaje' })
+  @ApiResponse({ status: 200, description: 'Viaje cancelado.' })
+  cancelTrip(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { reason: string },
+    @Req() req: { user: RequestUser },
+  ) {
+    const adminId = req.user.id;
+    return this.tripsService.cancelTrip(id, body.reason, adminId);
   }
 
   @Get('current')

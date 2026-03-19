@@ -1,0 +1,5 @@
+-- AlterEnum
+ALTER TYPE "TripStatus" ADD VALUE 'CANCELLED';
+
+-- AlterTable
+ALTER TABLE "Trip" ALTER COLUMN "updatedAt" SET DEFAULT CURRENT_TIMESTAMP;
