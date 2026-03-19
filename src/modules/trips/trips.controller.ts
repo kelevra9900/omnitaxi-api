@@ -105,7 +105,7 @@ export class TripsController {
     description: 'Error de validación en los datos enviados.',
   })
   assignTrip(@Body() assignTripDto: AssignTripDto) {
-    return this.tripsService.assignTripToPassenger(assignTripDto);
+    return this.tripsService.assignTrip(assignTripDto);
   }
 
   @Get('assignment-resources')

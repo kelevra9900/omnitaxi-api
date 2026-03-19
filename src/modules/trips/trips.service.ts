@@ -334,6 +334,45 @@ export class TripsService {
     }
   }
 
+  // Genera algo como: OT-7K2L9X (OT de OmniTransit)
+  generateFolio = (): string => {
+    // Quitamos async y el Promise
+    return `OT-${Math.random().toString(36).toUpperCase().substring(2, 8)}`;
+  };
+
+  // Ejemplo de lógica recomendada en el Backend (Controller/Service)
+  async assignTrip(dto: AssignTripDto) {
+    return await this.prisma.$transaction(async (tx) => {
+      // 1. Crear el Ticket
+      const ticket = await tx.ticket.create({
+        data: {
+          price: dto.price,
+          channel: dto.channel,
+          companyId: dto.companyId,
+          passengerId: dto.passengerId || null,
+          guestName: dto.guestName || null,
+          guestContact: dto.guestContact || null,
+          status: 'PAID',
+          folio: this.generateFolio(),
+        },
+      });
+
+      // 2. Crear el Trip vinculado
+      const trip = await tx.trip.create({
+        data: {
+          ticketId: ticket.id,
+          origin: dto.origin || 'GPS_UNKNOWN', // El backend puede sobreescribir esto con coords
+          destination: dto.destination,
+          operatorId: dto.operatorId,
+          vehicleId: dto.vehicleId,
+          companyId: dto.companyId,
+          status: 'ASSIGNED',
+        },
+      });
+
+      return { ticket, trip };
+    });
+  }
   /**
    * Obtener lo necesario para asignar un viaje a un pasajero
    *

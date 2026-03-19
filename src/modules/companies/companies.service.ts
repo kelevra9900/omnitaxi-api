@@ -96,6 +96,7 @@ export class CompaniesService {
           select: {
             id: true,
             licenseNumber: true,
+            trips: true,
             user: {
               select: {
                 name: true,
