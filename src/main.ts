@@ -14,7 +14,7 @@ async function bootstrap() {
 
   app.useLogger(logger);
   app.enableCors({
-    origin: ['http://localhost:3001'],
+    origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'],
     credentials: true,
   });
   app.useGlobalPipes(

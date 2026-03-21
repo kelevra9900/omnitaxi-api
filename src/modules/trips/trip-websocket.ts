@@ -15,7 +15,7 @@ import { TripStatus } from 'generated/prisma/enums';
 
 // Payload que viaja dentro del JWT
 interface WsJwtPayload {
-  sub: string;    // userId
+  sub: string; // userId
   email: string;
   role: string;
 }
@@ -25,12 +25,15 @@ interface LocationPayload {
   tripId: string;
   lat: number;
   lng: number;
-  heading?: number;  // Dirección en grados (0-360)
-  speed?: number;    // km/h
+  heading?: number; // Dirección en grados (0-360)
+  speed?: number; // km/h
 }
 
 @WebSocketGateway({
-  cors: { origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'], credentials: true },
+  cors: {
+    origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'],
+    credentials: true,
+  },
   namespace: 'trips',
 })
 export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -46,7 +49,9 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleConnection(client: Socket) {
     try {
-      const token = (client.handshake.auth.token as string) ?? client.handshake.headers.authorization?.replace('Bearer ', '');
+      const token =
+        (client.handshake.auth.token as string) ??
+        client.handshake.headers.authorization?.replace('Bearer ', '');
       if (!token) throw new Error('Token no proporcionado');
 
       const secret = process.env.JWT_SECRET_AUTH ?? '';
@@ -112,21 +117,26 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * Se persiste en BD y se reenvía al pasajero.
    */
   @SubscribeMessage('sendLocation')
-  async handleSendLocation(@ConnectedSocket() client: Socket, @MessageBody() data: LocationPayload) {
+  async handleSendLocation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: LocationPayload,
+  ) {
     if (client.data.role !== 'OPERATOR') {
       client.emit('error', { message: 'Solo operadores pueden enviar ubicación' });
       return;
     }
 
     // Persistir en BD (fire-and-forget para no bloquear el stream)
-    this.prisma.trip.update({
-      where: { id: data.tripId },
-      data: {
-        currentLat: data.lat,
-        currentLng: data.lng,
-        locationUpdatedAt: new Date(),
-      },
-    }).catch((err) => this.logger.error(`Error guardando ubicación: ${err.message}`));
+    this.prisma.trip
+      .update({
+        where: { id: data.tripId },
+        data: {
+          currentLat: data.lat,
+          currentLng: data.lng,
+          locationUpdatedAt: new Date(),
+        },
+      })
+      .catch((err) => this.logger.error(`Error guardando ubicación: ${err.message}`));
 
     // Emitir a todos los que estén en el room del viaje
     this.server.to(`trip_${data.tripId}`).emit('locationUpdate', {
@@ -144,13 +154,16 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /**
    * Notifica al operador que le fue asignado un nuevo viaje
    */
-  emitTripAssigned(operatorId: string, tripData: {
-    tripId: string;
-    origin: string;
-    destination: string;
-    passengerName?: string;
-    folio: string;
-  }) {
+  emitTripAssigned(
+    operatorId: string,
+    tripData: {
+      tripId: string;
+      origin: string;
+      destination: string;
+      passengerName?: string;
+      folio: string;
+    },
+  ) {
     this.server.to(`operator_${operatorId}`).emit('tripAssigned', tripData);
     this.logger.log(`Viaje ${tripData.tripId} asignado a operador ${operatorId}`);
   }
@@ -158,11 +171,14 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /**
    * Notifica a todos en el room que el viaje ha iniciado
    */
-  emitTripStarted(tripId: string, data: {
-    operatorName: string;
-    vehiclePlate: string;
-    startTime: string;
-  }) {
+  emitTripStarted(
+    tripId: string,
+    data: {
+      operatorName: string;
+      vehiclePlate: string;
+      startTime: string;
+    },
+  ) {
     this.server.to(`trip_${tripId}`).emit('tripStarted', {
       tripId,
       ...data,
@@ -183,10 +199,13 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /**
    * Notifica que el viaje fue completado
    */
-  emitTripCompleted(tripId: string, data: {
-    endTime: string;
-    duration?: number; // minutos
-  }) {
+  emitTripCompleted(
+    tripId: string,
+    data: {
+      endTime: string;
+      duration?: number; // minutos
+    },
+  ) {
     this.server.to(`trip_${tripId}`).emit('tripCompleted', {
       tripId,
       ...data,
@@ -196,10 +215,13 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /**
    * Notifica que el viaje fue cancelado
    */
-  emitTripCancelled(tripId: string, data: {
-    reason: string;
-    cancelledBy: string;
-  }) {
+  emitTripCancelled(
+    tripId: string,
+    data: {
+      reason: string;
+      cancelledBy: string;
+    },
+  ) {
     this.server.to(`trip_${tripId}`).emit('tripCancelled', {
       tripId,
       ...data,
