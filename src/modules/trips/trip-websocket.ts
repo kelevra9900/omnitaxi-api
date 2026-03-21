@@ -34,6 +34,7 @@ interface LocationPayload {
     origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'],
     credentials: true,
   },
+  transports: ['websocket', 'polling'],
   namespace: 'trips',
 })
 export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
