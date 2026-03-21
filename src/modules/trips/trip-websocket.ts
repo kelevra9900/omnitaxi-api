@@ -30,7 +30,7 @@ interface LocationPayload {
 }
 
 @WebSocketGateway({
-  cors: { origin: ['http://localhost:3001'], credentials: true },
+  cors: { origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'], credentials: true },
   namespace: 'trips',
 })
 export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {

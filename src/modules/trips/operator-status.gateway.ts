@@ -39,7 +39,7 @@ interface OperatorPresence {
 }
 
 @WebSocketGateway({
-  cors: { origin: ['http://localhost:3001'], credentials: true },
+  cors: { origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'], credentials: true },
   namespace: 'operator-status',
 })
 export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisconnect {
