@@ -13,6 +13,7 @@ import { ListTripsQueryDto } from './dto/list-trips-query.dto';
 import { TicketWhereInput } from 'generated/prisma/models';
 import { TicketStatus, TripStatus } from 'generated/prisma/enums';
 import { TripsGateway } from './trip-websocket';
+import { OperatorStatusGateway } from './operator-status.gateway';
 import { QRTicketPayload } from '@/common/interfaces/qr-ticket-payload.interface';
 import { AssignTripDto } from './dto/assign-trip.dto';
 import { GetAssignmentResourcesDto } from './dto/get-assignment-resources.dto';
@@ -22,18 +23,74 @@ export class TripsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tripsGateway: TripsGateway,
+    private readonly operatorStatusGateway: OperatorStatusGateway,
   ) {}
 
-  //### Boletos (consulta y gestión)
-  //
-  //Método | Ruta | Descripción |
-  //-------|------|-------------|
-  //`GET` | `/tickets` | Listar boletos (filtros: status, channel, companyId, fechas). |
-  //`GET` | `/tickets/:id` | Detalle boleto (folio, pago, viaje asociado). |
-  //`PATCH` | `/tickets/:id/cancel` | Cancelar boleto (admin, conforme políticas). |
-  //`GET` | `/tickets/:id/refund-status` | Estado de reembolso. |
+  /**
+   * Métricas del dashboard administrativo
+   */
+  async getDashboardStats() {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const [activeTrips, ticketsToday, revenueResult, avgDuration] = await this.prisma.$transaction([
+      // 1. Viajes activos (ASSIGNED + IN_PROGRESS)
+      this.prisma.trip.count({
+        where: { status: { in: [TripStatus.ASSIGNED, TripStatus.IN_PROGRESS] } },
+      }),
+
+      // 2. Boletos emitidos hoy
+      this.prisma.ticket.count({
+        where: { createdAt: { gte: startOfDay } },
+      }),
+
+      // 3. Ingresos del día (suma de precio de tickets pagados hoy)
+      this.prisma.ticket.aggregate({
+        where: {
+          createdAt: { gte: startOfDay },
+          status: { in: [TicketStatus.PAID, TicketStatus.USED] },
+        },
+        _sum: { price: true },
+      }),
+
+      // 4. Duración promedio de viajes completados hoy (en minutos)
+      this.prisma.$queryRaw<[{ avg_minutes: number | null }]>`
+        SELECT AVG(EXTRACT(EPOCH FROM ("endTime" - "startTime")) / 60) as avg_minutes
+        FROM "Trip"
+        WHERE status = 'COMPLETED'
+          AND "startTime" >= ${startOfDay}
+          AND "endTime" IS NOT NULL
+          AND "startTime" IS NOT NULL
+      `,
+    ]);
+
+    return {
+      activeTrips,
+      ticketsToday,
+      revenueToday: Number(revenueResult._sum.price ?? 0),
+      avgTripMinutes: avgDuration[0]?.avg_minutes
+        ? Math.round(avgDuration[0].avg_minutes)
+        : 0,
+    };
+  }
 
   createTicket() {}
+
+  async getActiveTrips() {
+    return this.prisma.trip.findMany({
+      where: {
+        status: { in: [TripStatus.ASSIGNED, TripStatus.IN_PROGRESS] },
+      },
+      include: {
+        operator: {
+          include: { user: { select: { name: true, photoUrl: true } } },
+        },
+        vehicle: { select: { id: true, plate: true } },
+        company: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
 
   async getAllTrips(query: ListTripsQueryDto) {
     const { page = 1, limit = 10, status, companyId, operatorId, from, to } = query;
@@ -167,7 +224,7 @@ export class TripsService {
     }
 
     // 5. Transacción Atómica
-    return this.prisma.$transaction(async (prisma) => {
+    const updatedTrip = await this.prisma.$transaction(async (prisma) => {
       // A. Boleto a estado "usado"
       await prisma.ticket.update({
         where: { id: trip.ticketId },
@@ -175,17 +232,28 @@ export class TripsService {
       });
 
       // B. Viaje a estado "en curso" Y ASIGNACIÓN DEL OPERADOR CORRECTO
-      const updatedTrip = await prisma.trip.update({
+      return prisma.trip.update({
         where: { id: trip.id },
         data: {
-          operatorId: operator.id, // <-- AQUÍ USAMOS EL ID DE LA TABLA OPERATOR
+          operatorId: operator.id,
           status: TripStatus.IN_PROGRESS,
           startTime: new Date(),
         },
+        include: {
+          operator: { include: { user: { select: { name: true } } } },
+          vehicle: { select: { plate: true } },
+        },
       });
-
-      return updatedTrip;
     });
+
+    // 6. Emitir evento en tiempo real al pasajero
+    this.tripsGateway.emitTripStarted(updatedTrip.id, {
+      operatorName: updatedTrip.operator?.user?.name ?? 'Operador',
+      vehiclePlate: updatedTrip.vehicle?.plate ?? '',
+      startTime: updatedTrip.startTime!.toISOString(),
+    });
+
+    return updatedTrip;
   }
 
   async getCurrentTripInfo(id: string) {
@@ -199,7 +267,24 @@ export class TripsService {
     if (!trip) throw new NotFoundException('Viaje no encontrado');
     if (trip.status !== TripStatus.IN_PROGRESS)
       throw new BadRequestException('Viaje no puede ser completado');
-    return this.prisma.trip.update({ where: { id }, data: { status: TripStatus.COMPLETED } });
+
+    const endTime = new Date();
+    const updated = await this.prisma.trip.update({
+      where: { id },
+      data: { status: TripStatus.COMPLETED, endTime },
+    });
+
+    // Calcular duración en minutos
+    const duration = trip.startTime
+      ? Math.round((endTime.getTime() - trip.startTime.getTime()) / 60000)
+      : undefined;
+
+    this.tripsGateway.emitTripCompleted(id, {
+      endTime: endTime.toISOString(),
+      duration,
+    });
+
+    return updated;
   }
 
   async updateLocation(tripId: string, lat: number, lng: number) {
@@ -213,7 +298,6 @@ export class TripsService {
     });
 
     this.tripsGateway.emitLocationUpdate(tripId, { lat, lng });
-
     return updatedTrip;
   }
 
@@ -342,7 +426,7 @@ export class TripsService {
 
   // Ejemplo de lógica recomendada en el Backend (Controller/Service)
   async assignTrip(dto: AssignTripDto) {
-    return await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       // 1. Crear el Ticket
       const ticket = await tx.ticket.create({
         data: {
@@ -361,7 +445,7 @@ export class TripsService {
       const trip = await tx.trip.create({
         data: {
           ticketId: ticket.id,
-          origin: dto.origin || 'GPS_UNKNOWN', // El backend puede sobreescribir esto con coords
+          origin: dto.origin || 'GPS_UNKNOWN',
           destination: dto.destination,
           operatorId: dto.operatorId,
           vehicleId: dto.vehicleId,
@@ -372,6 +456,20 @@ export class TripsService {
 
       return { ticket, trip };
     });
+
+    // 3. Notificar al operador en tiempo real y sacarlo de la fila
+    if (dto.operatorId) {
+      this.tripsGateway.emitTripAssigned(dto.operatorId, {
+        tripId: result.trip.id,
+        origin: dto.origin || 'GPS_UNKNOWN',
+        destination: dto.destination,
+        passengerName: dto.guestName ?? undefined,
+        folio: result.ticket.folio,
+      });
+      this.operatorStatusGateway.removeFromQueue(dto.operatorId);
+    }
+
+    return result;
   }
   /**
    * Obtener lo necesario para asignar un viaje a un pasajero
@@ -442,7 +540,7 @@ export class TripsService {
    * Aborta o cancela un viaje por falla mecánica, error o solicitud
    */
   async cancelTrip(tripId: string, reason: string, adminId: string) {
-    return await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       // 1. Marcar el viaje como cancelado
       const trip = await tx.trip.update({
         where: { id: tripId },
@@ -471,11 +569,19 @@ export class TripsService {
           resourceType: 'Trip',
           resourceId: tripId,
           userId: adminId,
-          metadata: { reason }, // Guardamos por qué se canceló
+          metadata: { reason },
         },
       });
 
       return trip;
     });
+
+    // 4. Notificar en tiempo real a todos los que estén siguiendo el viaje
+    this.tripsGateway.emitTripCancelled(tripId, {
+      reason,
+      cancelledBy: adminId,
+    });
+
+    return result;
   }
 }

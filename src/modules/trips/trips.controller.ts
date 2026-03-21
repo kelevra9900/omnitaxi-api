@@ -42,6 +42,22 @@ import { RequestUser } from '../auth/auth.controller';
 export class TripsController {
   constructor(private readonly tripsService: TripsService) {}
 
+  @Get('stats')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Métricas del dashboard administrativo' })
+  @ApiResponse({ status: 200, description: 'Estadísticas del día.' })
+  getDashboardStats() {
+    return this.tripsService.getDashboardStats();
+  }
+
+  @Get('active')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Viajes activos (ASSIGNED + IN_PROGRESS)' })
+  @ApiResponse({ status: 200, description: 'Lista de viajes en curso.' })
+  getActiveTrips() {
+    return this.tripsService.getActiveTrips();
+  }
+
   @Get()
   @ApiOperation({
     summary: 'Listar viajes',
