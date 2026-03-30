@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsDateString, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
 
 export class UpdateOperatorDto {
   @ApiPropertyOptional({ example: 'LIC-12345', description: 'Número de licencia' })
@@ -17,4 +17,14 @@ export class UpdateOperatorDto {
   @IsOptional()
   @IsBoolean()
   isValidated?: boolean;
+
+  @ApiPropertyOptional({ description: 'UUID de la empresa a la que pertenece el operador' })
+  @IsOptional()
+  @IsUUID()
+  companyId?: string;
+
+  @ApiPropertyOptional({ description: 'UUID del vehículo asignado al operador (null para desasignar)' })
+  @IsOptional()
+  @IsUUID()
+  vehicleId?: string | null;
 }

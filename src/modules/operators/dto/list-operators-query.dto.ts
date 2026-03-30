@@ -23,6 +23,11 @@ export class ListOperatorsQueryDto {
   @IsUUID()
   companyId?: string;
 
+  @ApiPropertyOptional({ description: 'Filtrar por usuario (userId)' })
+  @IsOptional()
+  @IsUUID()
+  userId?: string;
+
   @ApiPropertyOptional({ description: 'Filtrar por operador validado' })
   @IsOptional()
   @Type(() => Boolean)

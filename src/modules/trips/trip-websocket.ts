@@ -4,13 +4,16 @@ import {
   SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   ConnectedSocket,
   MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
+import { createAdapter } from '@socket.io/redis-adapter';
 import { PrismaService } from '@/prisma/prisma.service';
+import { RedisService } from '@/redis/redis.service';
 import { TripStatus } from 'generated/prisma/enums';
 
 // Payload que viaja dentro del JWT
@@ -20,33 +23,84 @@ interface WsJwtPayload {
   role: string;
 }
 
-// Datos de ubicación que envía el operador
+// Datos de ubicacion que envia el operador
 interface LocationPayload {
   tripId: string;
   lat: number;
   lng: number;
-  heading?: number; // Dirección en grados (0-360)
+  heading?: number; // Direccion en grados (0-360)
   speed?: number; // km/h
 }
 
+// Intervalo de flush de ubicaciones (5 segundos)
+const LOCATION_FLUSH_INTERVAL_MS = 5_000;
+const LOCATION_FLUSH_BATCH_SIZE = 200;
+// Rate limit: maximo 1 ubicacion por segundo por socket
+const LOCATION_RATE_LIMIT_MS = 1_000;
+// Maximo conexiones simultaneas por namespace
+const MAX_CONNECTIONS = 1_000;
+
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'],
+    origin: process.env.WS_CORS_ORIGINS?.split(',') ?? [
+      'http://localhost:3001',
+      'https://omnitaxi-admin.vercel.app',
+    ],
     credentials: true,
   },
   transports: ['websocket', 'polling'],
   namespace: 'trips',
 })
-export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class TripsGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+{
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(TripsGateway.name);
+  private flushInterval: ReturnType<typeof setInterval>;
 
-  // Mapa de operadores conectados: operatorId → socketId
-  private onlineOperators = new Map<string, string>();
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
-  constructor(private readonly prisma: PrismaService) {}
+  // ─── Socket.IO Redis Adapter + Location Flush Timer ───────────────
 
-  // ─── Conexión / Desconexión ─────────────────────────────────────────
+  afterInit(server: Server) {
+    try {
+      const pubClient = this.redis.getClient();
+      const subClient = this.redis.createDuplicate();
+      server.adapter(createAdapter(pubClient, subClient));
+      this.logger.log('Redis adapter initialized for trips namespace');
+    } catch {
+      this.logger.warn('Redis adapter no disponible, usando adaptador en memoria (single-node)');
+    }
+
+    // Middleware: limitar conexiones simultaneas
+    server.use((_socket, next) => {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+      const count: number = (server as any).server?.engine?.clientsCount ?? 0;
+      if (count >= MAX_CONNECTIONS) {
+        return next(new Error('Servidor a capacidad maxima'));
+      }
+      next();
+    });
+
+    // Iniciar flush periodico de ubicaciones
+    this.flushInterval = setInterval(() => {
+      this.flushLocationBuffer().catch((err) =>
+        this.logger.error('Error flushing location buffer', err.message),
+      );
+    }, LOCATION_FLUSH_INTERVAL_MS);
+  }
+
+  async onModuleDestroy() {
+    if (this.flushInterval) clearInterval(this.flushInterval);
+    await this.flushLocationBuffer().catch((err: Error) =>
+      this.logger.warn(`Flush final omitido durante shutdown: ${err.message}`),
+    );
+  }
+
+  // ─── Conexion / Desconexion ───────────────────────────────────────
 
   async handleConnection(client: Socket) {
     try {
@@ -58,11 +112,15 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const secret = process.env.JWT_SECRET_AUTH ?? '';
       const payload = jwt.verify(token, secret) as WsJwtPayload;
 
-      // Adjuntamos datos del usuario al socket para uso posterior
       client.data.userId = payload.sub;
       client.data.role = payload.role;
 
       this.logger.log(`Cliente conectado: ${payload.email} (${payload.role})`);
+
+      // Admins y Companies se unen al room dashboard para recibir todos los eventos de viajes
+      if (payload.role === 'ADMIN' || payload.role === 'COMPANY') {
+        void client.join('dashboard');
+      }
 
       // Si es operador, registrarlo como online
       if (payload.role === 'OPERATOR') {
@@ -71,51 +129,44 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
         if (operator) {
           client.data.operatorId = operator.id;
-          this.onlineOperators.set(operator.id, client.id);
-          // Unir al operador a su room personal para recibir asignaciones
+          await this.redis.setOnlineOperator(operator.id, client.id);
           client.join(`operator_${operator.id}`);
-          this.emitOperatorCount();
+          await this.emitOperatorCount();
         }
       }
     } catch {
-      this.logger.warn('Conexión rechazada: token inválido');
+      this.logger.warn('Conexion rechazada: token invalido');
       client.emit('error', { message: 'No autorizado' });
       client.disconnect();
     }
   }
 
-  handleDisconnect(client: Socket) {
+  async handleDisconnect(client: Socket) {
     const operatorId = client.data?.operatorId;
     if (operatorId) {
-      this.onlineOperators.delete(operatorId);
-      this.emitOperatorCount();
+      await this.redis.removeOnlineOperator(operatorId);
+      await this.emitOperatorCount();
       this.logger.log(`Operador desconectado: ${operatorId}`);
     }
   }
 
-  // ─── Eventos que escucha del cliente ────────────────────────────────
+  // ─── Eventos que escucha del cliente ──────────────────────────────
 
-  /**
-   * Pasajero u operador se une al room de un viaje para recibir actualizaciones
-   */
   @SubscribeMessage('joinTrip')
   handleJoinTrip(@ConnectedSocket() client: Socket, @MessageBody() tripId: string) {
     client.join(`trip_${tripId}`);
-    this.logger.log(`${client.data.role} se unió al viaje ${tripId}`);
+    this.logger.log(`${client.data.role} se unio al viaje ${tripId}`);
     client.emit('joinedTrip', { tripId });
   }
 
-  /**
-   * Pasajero u operador sale del room de un viaje
-   */
   @SubscribeMessage('leaveTrip')
   handleLeaveTrip(@ConnectedSocket() client: Socket, @MessageBody() tripId: string) {
     client.leave(`trip_${tripId}`);
   }
 
   /**
-   * El operador envía su ubicación en tiempo real durante un viaje activo.
-   * Se persiste en BD y se reenvía al pasajero.
+   * El operador envia su ubicacion en tiempo real durante un viaje activo.
+   * Se buferea en Redis y se persiste en batch. Se reenvia al pasajero en tiempo real.
    */
   @SubscribeMessage('sendLocation')
   async handleSendLocation(
@@ -123,23 +174,29 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: LocationPayload,
   ) {
     if (client.data.role !== 'OPERATOR') {
-      client.emit('error', { message: 'Solo operadores pueden enviar ubicación' });
+      client.emit('error', { message: 'Solo operadores pueden enviar ubicacion' });
       return;
     }
 
-    // Persistir en BD (fire-and-forget para no bloquear el stream)
-    this.prisma.trip
-      .update({
-        where: { id: data.tripId },
-        data: {
-          currentLat: data.lat,
-          currentLng: data.lng,
-          locationUpdatedAt: new Date(),
-        },
-      })
-      .catch((err) => this.logger.error(`Error guardando ubicación: ${err.message}`));
+    // Rate limiting: maximo 1 update por segundo por socket
+    const now = Date.now();
+    const lastSend: number = client.data.lastLocationSend ?? 0;
+    if (now - lastSend < LOCATION_RATE_LIMIT_MS) {
+      return; // Silently drop
+    }
+    client.data.lastLocationSend = now;
 
-    // Emitir a todos los que estén en el room del viaje
+    // Bufferear en Redis para persistencia batch
+    await this.redis.bufferLocation({
+      tripId: data.tripId,
+      lat: data.lat,
+      lng: data.lng,
+      heading: data.heading,
+      speed: data.speed,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Emitir en tiempo real a todos los que esten en el room del viaje
     this.server.to(`trip_${data.tripId}`).emit('locationUpdate', {
       tripId: data.tripId,
       lat: data.lat,
@@ -150,11 +207,37 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  // ─── Métodos que se llaman desde el Service ─────────────────────────
+  // ─── Flush de ubicaciones (batch write a PostgreSQL) ──────────────
 
-  /**
-   * Notifica al operador que le fue asignado un nuevo viaje
-   */
+  async flushLocationBuffer() {
+    const entries = await this.redis.flushLocationBuffer(LOCATION_FLUSH_BATCH_SIZE);
+    if (entries.length === 0) return;
+
+    // Solo guardar la ultima ubicacion por viaje
+    const latestByTrip = new Map<string, (typeof entries)[0]>();
+    for (const entry of entries) {
+      latestByTrip.set(entry.tripId, entry);
+    }
+
+    // Batch update con transaccion
+    await this.prisma.$transaction(
+      Array.from(latestByTrip.values()).map((entry) =>
+        this.prisma.trip.update({
+          where: { id: entry.tripId },
+          data: {
+            currentLat: entry.lat,
+            currentLng: entry.lng,
+            locationUpdatedAt: new Date(entry.timestamp),
+          },
+        }),
+      ),
+    );
+
+    this.logger.debug(`Flushed ${entries.length} locations for ${latestByTrip.size} trips`);
+  }
+
+  // ─── Metodos que se llaman desde el Service ───────────────────────
+
   emitTripAssigned(
     operatorId: string,
     tripData: {
@@ -165,13 +248,10 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       folio: string;
     },
   ) {
-    this.server.to(`operator_${operatorId}`).emit('tripAssigned', tripData);
+    this.server.to(`operator_${operatorId}`).to('dashboard').emit('tripAssigned', tripData);
     this.logger.log(`Viaje ${tripData.tripId} asignado a operador ${operatorId}`);
   }
 
-  /**
-   * Notifica a todos en el room que el viaje ha iniciado
-   */
   emitTripStarted(
     tripId: string,
     data: {
@@ -180,15 +260,15 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       startTime: string;
     },
   ) {
-    this.server.to(`trip_${tripId}`).emit('tripStarted', {
-      tripId,
-      ...data,
-    });
+    this.server
+      .to(`trip_${tripId}`)
+      .to('dashboard')
+      .emit('tripStarted', {
+        tripId,
+        ...data,
+      });
   }
 
-  /**
-   * Emite actualización de ubicación desde el servicio (método alternativo al socket directo)
-   */
   emitLocationUpdate(tripId: string, location: { lat: number; lng: number }) {
     this.server.to(`trip_${tripId}`).emit('locationUpdate', {
       tripId,
@@ -197,25 +277,22 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  /**
-   * Notifica que el viaje fue completado
-   */
   emitTripCompleted(
     tripId: string,
     data: {
       endTime: string;
-      duration?: number; // minutos
+      duration?: number;
     },
   ) {
-    this.server.to(`trip_${tripId}`).emit('tripCompleted', {
-      tripId,
-      ...data,
-    });
+    this.server
+      .to(`trip_${tripId}`)
+      .to('dashboard')
+      .emit('tripCompleted', {
+        tripId,
+        ...data,
+      });
   }
 
-  /**
-   * Notifica que el viaje fue cancelado
-   */
   emitTripCancelled(
     tripId: string,
     data: {
@@ -223,39 +300,28 @@ export class TripsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       cancelledBy: string;
     },
   ) {
-    this.server.to(`trip_${tripId}`).emit('tripCancelled', {
-      tripId,
-      ...data,
-    });
+    this.server
+      .to(`trip_${tripId}`)
+      .to('dashboard')
+      .emit('tripCancelled', {
+        tripId,
+        ...data,
+      });
   }
 
-  /**
-   * Emite la cantidad de operadores conectados (útil para dashboard admin)
-   */
-  private emitOperatorCount() {
-    this.server.emit('operatorsOnline', {
-      count: this.onlineOperators.size,
-    });
+  private async emitOperatorCount() {
+    const count = await this.redis.getOnlineOperatorCount();
+    this.server.emit('operatorsOnline', { count });
   }
 
-  /**
-   * Verifica si un operador está conectado
-   */
-  isOperatorOnline(operatorId: string): boolean {
-    return this.onlineOperators.has(operatorId);
+  async isOperatorOnline(operatorId: string): Promise<boolean> {
+    return this.redis.isOperatorOnline(operatorId);
   }
 
-  /**
-   * Retorna IDs de operadores conectados
-   */
-  getOnlineOperatorIds(): string[] {
-    return Array.from(this.onlineOperators.keys());
+  async getOnlineOperatorIds(): Promise<string[]> {
+    return this.redis.getOnlineOperatorIds();
   }
 
-  /**
-   * Notifica a todos los viajes activos de un operador que está desconectado
-   * (útil para emergencias)
-   */
   async emitOperatorDisconnectedFromTrips(operatorId: string) {
     const activeTrips = await this.prisma.trip.findMany({
       where: {

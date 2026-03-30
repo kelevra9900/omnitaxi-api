@@ -68,9 +68,7 @@ export class TripsService {
       activeTrips,
       ticketsToday,
       revenueToday: Number(revenueResult._sum.price ?? 0),
-      avgTripMinutes: avgDuration[0]?.avg_minutes
-        ? Math.round(avgDuration[0].avg_minutes)
-        : 0,
+      avgTripMinutes: avgDuration[0]?.avg_minutes ? Math.round(avgDuration[0].avg_minutes) : 0,
     };
   }
 
@@ -172,8 +170,6 @@ export class TripsService {
         },
       },
     });
-
-    console.log('Trip getted ===>', trip);
 
     if (!trip) {
       throw new NotFoundException('No tienes ningún viaje en curso en este momento.');
@@ -466,7 +462,7 @@ export class TripsService {
         passengerName: dto.guestName ?? undefined,
         folio: result.ticket.folio,
       });
-      this.operatorStatusGateway.removeFromQueue(dto.operatorId);
+      await this.operatorStatusGateway.removeFromQueue(dto.operatorId);
     }
 
     return result;

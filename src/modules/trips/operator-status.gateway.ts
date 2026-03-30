@@ -4,13 +4,16 @@ import {
   SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   ConnectedSocket,
   MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
+import { createAdapter } from '@socket.io/redis-adapter';
 import { PrismaService } from '@/prisma/prisma.service';
+import { RedisService, OperatorPresenceData } from '@/redis/redis.service';
 
 interface WsJwtPayload {
   sub: string;
@@ -24,37 +27,44 @@ interface SocketData {
   operatorId?: string;
 }
 
-// Estado de disponibilidad del operador en la fila del aeropuerto
-interface OperatorPresence {
-  operatorId: string;
-  socketId: string;
-  userId: string;
-  name: string;
-  companyId: string;
-  companyName: string;
-  vehiclePlate?: string;
-  vehicleId?: string;
-  connectedAt: Date;
-  lastPing: Date;
-}
-
 @WebSocketGateway({
-  cors: { origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'], credentials: true },
+  cors: {
+    origin: process.env.WS_CORS_ORIGINS?.split(',') ?? [
+      'http://localhost:3001',
+      'https://omnitaxi-admin.vercel.app',
+    ],
+    credentials: true,
+  },
   transports: ['websocket', 'polling'],
   namespace: 'operator-status',
 })
-export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class OperatorStatusGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(OperatorStatusGateway.name);
 
-  // Operadores disponibles en la fila (listos para recibir viajes)
-  private availableOperators = new Map<string, OperatorPresence>();
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
-  constructor(private readonly prisma: PrismaService) {}
+  // ─── Socket.IO Redis Adapter para escalado horizontal ─────────────
 
-  // ─── Conexión / Desconexión ─────────────────────────────────────────
+  afterInit(server: Server) {
+    try {
+      const pubClient = this.redis.getClient();
+      const subClient = this.redis.createDuplicate();
+      server.adapter(createAdapter(pubClient, subClient));
+      this.logger.log('Redis adapter initialized for operator-status namespace');
+    } catch {
+      this.logger.warn('Redis adapter no disponible, usando adaptador en memoria (single-node)');
+    }
+  }
 
-  handleConnection(client: Socket) {
+  // ─── Conexion / Desconexion ───────────────────────────────────────
+
+  async handleConnection(client: Socket) {
     try {
       const token =
         (client.handshake.auth.token as string) ??
@@ -71,8 +81,7 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
       // Los admins/companies se unen a un room para recibir actualizaciones del dashboard
       if (payload.role === 'ADMIN' || payload.role === 'COMPANY') {
         void client.join('dashboard');
-        // Enviar estado actual de la fila
-        client.emit('queueState', this.getQueueSnapshot());
+        client.emit('queueState', await this.getQueueSnapshot());
       }
 
       this.logger.log(`Conectado a operator-status: ${payload.email} (${payload.role})`);
@@ -82,22 +91,18 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
     }
   }
 
-  handleDisconnect(client: Socket) {
+  async handleDisconnect(client: Socket) {
     const data = client.data as SocketData;
     const operatorId = data?.operatorId;
-    if (operatorId && this.availableOperators.has(operatorId)) {
-      this.availableOperators.delete(operatorId);
-      this.broadcastQueueUpdate();
-      this.logger.log(`Operador ${operatorId} salió de la fila`);
+    if (operatorId && (await this.redis.isInQueue(operatorId))) {
+      await this.redis.removeOperatorPresence(operatorId);
+      await this.broadcastQueueUpdate();
+      this.logger.log(`Operador ${operatorId} salio de la fila`);
     }
   }
 
-  // ─── Eventos del Operador ──────────────────────────────────────────
+  // ─── Eventos del Operador ─────────────────────────────────────────
 
-  /**
-   * El operador entra a la fila de espera del aeropuerto.
-   * Envía su vehicleId para que el dashboard sepa qué unidad tiene.
-   */
   @SubscribeMessage('enterQueue')
   async handleEnterQueue(
     @ConnectedSocket() client: Socket,
@@ -106,9 +111,7 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
     const socketData = client.data as SocketData;
 
     if (socketData.role !== 'OPERATOR') {
-      client.emit('error', {
-        message: 'Solo operadores pueden entrar a la fila',
-      });
+      client.emit('error', { message: 'Solo operadores pueden entrar a la fila' });
       return;
     }
 
@@ -121,9 +124,7 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
     });
 
     if (!operator) {
-      client.emit('error', {
-        message: 'Perfil de operador no encontrado',
-      });
+      client.emit('error', { message: 'Perfil de operador no encontrado' });
       return;
     }
 
@@ -136,7 +137,7 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
       vehiclePlate = vehicle?.plate;
     }
 
-    const presence: OperatorPresence = {
+    const presence: OperatorPresenceData = {
       operatorId: operator.id,
       socketId: client.id,
       userId: socketData.userId,
@@ -145,76 +146,68 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
       companyName: operator.company.name,
       vehiclePlate,
       vehicleId: data.vehicleId,
-      connectedAt: new Date(),
-      lastPing: new Date(),
+      connectedAt: new Date().toISOString(),
+      lastPing: new Date().toISOString(),
     };
 
     socketData.operatorId = operator.id;
-    this.availableOperators.set(operator.id, presence);
+    await this.redis.setOperatorPresence(operator.id, presence);
     void client.join(`company_${operator.company.id}`);
 
+    const queueSize = await this.redis.getOperatorQueueSize();
+    const position = await this.getOperatorPosition(operator.id);
+
     client.emit('enteredQueue', {
-      position: this.getOperatorPosition(operator.id),
-      totalInQueue: this.availableOperators.size,
+      position,
+      totalInQueue: queueSize,
     });
 
-    this.broadcastQueueUpdate();
-    this.logger.log(`Operador ${operator.user.name} entró a la fila`);
+    await this.broadcastQueueUpdate();
+    this.logger.log(`Operador ${operator.user.name} entro a la fila`);
   }
 
-  /**
-   * El operador sale de la fila voluntariamente
-   */
   @SubscribeMessage('leaveQueue')
-  handleLeaveQueue(@ConnectedSocket() client: Socket) {
+  async handleLeaveQueue(@ConnectedSocket() client: Socket) {
     const socketData = client.data as SocketData;
     const operatorId = socketData?.operatorId;
     if (operatorId) {
-      this.availableOperators.delete(operatorId);
+      await this.redis.removeOperatorPresence(operatorId);
       client.emit('leftQueue', { message: 'Has salido de la fila' });
-      this.broadcastQueueUpdate();
+      await this.broadcastQueueUpdate();
     }
   }
 
-  /**
-   * Heartbeat para mantener la presencia activa
-   */
   @SubscribeMessage('ping')
-  handlePing(@ConnectedSocket() client: Socket) {
+  async handlePing(@ConnectedSocket() client: Socket) {
     const socketData = client.data as SocketData;
     const operatorId = socketData?.operatorId;
-    if (operatorId && this.availableOperators.has(operatorId)) {
-      const presence = this.availableOperators.get(operatorId)!;
-      presence.lastPing = new Date();
-      this.availableOperators.set(operatorId, presence);
+    if (operatorId) {
+      const presence = await this.redis.getOperatorPresence(operatorId);
+      if (presence) {
+        presence.lastPing = new Date().toISOString();
+        await this.redis.setOperatorPresence(operatorId, presence);
+      }
     }
     client.emit('pong', { timestamp: new Date().toISOString() });
   }
 
-  // ─── Métodos llamados desde el Service ──────────────────────────────
+  // ─── Metodos llamados desde el Service ────────────────────────────
 
-  /**
-   * Cuando se asigna un viaje, sacamos al operador de la fila
-   */
-  removeFromQueue(operatorId: string) {
-    if (this.availableOperators.has(operatorId)) {
-      this.availableOperators.delete(operatorId);
-      this.broadcastQueueUpdate();
+  async removeFromQueue(operatorId: string) {
+    if (await this.redis.isInQueue(operatorId)) {
+      await this.redis.removeOperatorPresence(operatorId);
+      await this.broadcastQueueUpdate();
     }
   }
 
-  /**
-   * Retorna los operadores disponibles de una compañía específica
-   */
-  getAvailableByCompany(companyId: string): OperatorPresence[] {
-    return Array.from(this.availableOperators.values()).filter((op) => op.companyId === companyId);
+  async getAvailableByCompany(companyId: string): Promise<OperatorPresenceData[]> {
+    const all = await this.redis.getAllOperatorPresences();
+    return all.filter((op) => op.companyId === companyId);
   }
 
-  /**
-   * Retorna todos los operadores en fila
-   */
-  getQueueSnapshot() {
-    return Array.from(this.availableOperators.values()).map((op, index) => ({
+  async getQueueSnapshot() {
+    const all = await this.redis.getAllOperatorPresences();
+    return all.map((op, index) => ({
       position: index + 1,
       operatorId: op.operatorId,
       name: op.name,
@@ -222,38 +215,35 @@ export class OperatorStatusGateway implements OnGatewayConnection, OnGatewayDisc
       companyName: op.companyName,
       vehiclePlate: op.vehiclePlate,
       vehicleId: op.vehicleId,
-      waitingSince: op.connectedAt.toISOString(),
+      waitingSince: op.connectedAt,
     }));
   }
 
-  /**
-   * Verifica si un operador está en la fila
-   */
-  isInQueue(operatorId: string): boolean {
-    return this.availableOperators.has(operatorId);
+  async isInQueue(operatorId: string): Promise<boolean> {
+    return this.redis.isInQueue(operatorId);
   }
 
-  // ─── Helpers ────────────────────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────────
 
-  private getOperatorPosition(operatorId: string): number {
-    const keys = Array.from(this.availableOperators.keys());
-    return keys.indexOf(operatorId) + 1;
+  private async getOperatorPosition(operatorId: string): Promise<number> {
+    const all = await this.redis.getAllOperatorPresences();
+    const index = all.findIndex((op) => op.operatorId === operatorId);
+    return index + 1;
   }
 
-  private broadcastQueueUpdate() {
-    const snapshot = this.getQueueSnapshot();
-    // Notificar al dashboard de admins
+  private async broadcastQueueUpdate() {
+    const snapshot = await this.getQueueSnapshot();
     this.server.to('dashboard').emit('queueUpdate', {
       queue: snapshot,
       totalAvailable: snapshot.length,
       timestamp: new Date().toISOString(),
     });
 
-    // Notificar a cada operador su posición actual
-    for (const [operatorId, presence] of this.availableOperators) {
-      this.server.to(presence.socketId).emit('queuePosition', {
-        position: this.getOperatorPosition(operatorId),
-        totalInQueue: this.availableOperators.size,
+    // Notificar a cada operador su posicion actual
+    for (const [index, op] of snapshot.entries()) {
+      this.server.to(op.operatorId).emit('queuePosition', {
+        position: index + 1,
+        totalInQueue: snapshot.length,
       });
     }
   }

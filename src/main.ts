@@ -6,6 +6,8 @@ import * as dotenv from 'dotenv';
 
 dotenv.config();
 
+const DEFAULT_CORS_ORIGINS = ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'];
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule as Type<object>, {
@@ -13,10 +15,14 @@ async function bootstrap() {
   });
 
   app.useLogger(logger);
+
+  // CORS centralizado desde variable de entorno
+  const origins = process.env.CORS_ORIGINS?.split(',') ?? DEFAULT_CORS_ORIGINS;
   app.enableCors({
-    origin: ['http://localhost:3001', 'https://omnitaxi-admin.vercel.app'],
+    origin: origins,
     credentials: true,
   });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -24,6 +30,9 @@ async function bootstrap() {
       transform: true,
     }),
   );
+
+  // Graceful shutdown hooks
+  app.enableShutdownHooks();
 
   const config = new DocumentBuilder()
     .setTitle('OmniTransit API')
@@ -54,6 +63,7 @@ async function bootstrap() {
   await app.listen(port);
   logger.log(`Application is running on: http://localhost:${port}`);
   logger.log(`Swagger UI: http://localhost:${port}/api`);
+  logger.log(`Health check: http://localhost:${port}/health`);
 }
 
 bootstrap();

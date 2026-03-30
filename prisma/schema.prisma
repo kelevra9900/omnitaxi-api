@@ -91,16 +91,19 @@ model Operator {
   user             User      @relation(fields: [userId], references: [id])
   companyId        String
   company          Company   @relation(fields: [companyId], references: [id])
+  vehicleId        String?
+  vehicle          Vehicle?  @relation(fields: [vehicleId], references: [id])
 
   trips Trip[]
 }
 
 model Vehicle {
-  id        String  @id @default(uuid())
-  plate     String  @unique
-  isActive  Boolean @default(true)
+  id        String     @id @default(uuid())
+  plate     String     @unique
+  isActive  Boolean    @default(true)
   companyId String
-  company   Company @relation(fields: [companyId], references: [id])
+  company   Company    @relation(fields: [companyId], references: [id])
+  operators Operator[]
 
   trips Trip[]
 }

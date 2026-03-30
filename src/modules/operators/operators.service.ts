@@ -46,7 +46,7 @@ export class OperatorsService {
   async findById(id: string) {
     const operator = await this.prisma.operator.findUnique({
       where: { id },
-      include: { user: true, company: true },
+      include: { user: true, company: true, vehicle: true },
     });
     if (!operator) throw new NotFoundException('Operador no encontrado');
     return operator;
@@ -56,8 +56,9 @@ export class OperatorsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
-    const where: { companyId?: string; isValidated?: boolean } = {};
+    const where: { companyId?: string; isValidated?: boolean; userId?: string } = {};
     if (query.companyId) where.companyId = query.companyId;
+    if (query.userId) where.userId = query.userId;
     if (query.isValidated != null) where.isValidated = query.isValidated;
 
     const [data, total] = await Promise.all([
@@ -76,6 +77,7 @@ export class OperatorsService {
             },
           },
           company: true,
+          vehicle: true,
         },
       }),
       this.prisma.operator.count({ where }),
@@ -103,6 +105,17 @@ export class OperatorsService {
       });
       if (existing) throw new ConflictException('Ya existe un operador con ese número de licencia');
     }
+    if (dto.companyId != null) {
+      const company = await this.prisma.company.findUnique({ where: { id: dto.companyId } });
+      if (!company) throw new NotFoundException('Empresa no encontrada');
+    }
+    if (dto.vehicleId != null) {
+      const vehicle = await this.prisma.vehicle.findUnique({ where: { id: dto.vehicleId } });
+      if (!vehicle) throw new NotFoundException('Vehículo no encontrado');
+      if (vehicle.companyId !== operator.companyId)
+        throw new BadRequestException('El vehículo no pertenece a la empresa del operador');
+    }
+
     const updated = await this.prisma.operator.update({
       where: { id },
       data: {
@@ -111,18 +124,33 @@ export class OperatorsService {
           licenseExpiresAt: dto.licenseExpiresAt ? new Date(dto.licenseExpiresAt) : null,
         }),
         ...(dto.isValidated !== undefined && { isValidated: dto.isValidated }),
+        ...(dto.companyId != null && { companyId: dto.companyId }),
+        ...(dto.vehicleId !== undefined && { vehicleId: dto.vehicleId }),
       },
     });
     return updated;
   }
 
-  async getDashboardData(operatorId: string): Promise<OperatorDashboardDto> {
+  async getDashboardData(userId: string): Promise<OperatorDashboardDto> {
     const zone = 'America/Mexico_City';
     const startOfToday = DateTime.now().setZone(zone).startOf('day').toJSDate();
 
+    // The JWT carries userId (User.id). Trip.operatorId references Operator.id — a different UUID.
+    // We must resolve the Operator record first before querying trips.
+    const operatorRecord = await this.prisma.operator.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (!operatorRecord) {
+      throw new NotFoundException('Operador no encontrado');
+    }
+
+    const operatorId = operatorRecord.id;
+
     const [operator, activeTrip, statsToday] = await Promise.all([
       this.prisma.user.findUnique({
-        where: { id: operatorId },
+        where: { id: userId },
         select: { id: true, name: true },
       }),
       this.prisma.trip.findFirst({
@@ -145,7 +173,7 @@ export class OperatorsService {
     ]);
 
     if (!operator) {
-      throw new NotFoundException('Operador no encontrado');
+      throw new NotFoundException('Usuario no encontrado');
     }
 
     return {

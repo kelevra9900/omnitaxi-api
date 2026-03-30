@@ -96,12 +96,19 @@ export class CompaniesService {
           select: {
             id: true,
             licenseNumber: true,
+            vehicleId: true,
             trips: true,
             user: {
               select: {
                 name: true,
                 photoUrl: true,
                 isActive: true,
+              },
+            },
+            vehicle: {
+              select: {
+                id: true,
+                plate: true,
               },
             },
           },
